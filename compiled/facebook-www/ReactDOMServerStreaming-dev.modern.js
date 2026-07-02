@@ -2778,7 +2778,7 @@ __DEV__ &&
                 nonce: props.nonce,
                 type: props.type,
                 fetchPriority: props.fetchPriority,
-                referrerPolicy: props.refererPolicy
+                referrerPolicy: props.referrerPolicy
               })),
               0 <= (headers.remainingCapacity -= header.length + 2))
                 ? ((renderState.resets.image[key$jscomp$0] = PRELOAD_NO_CREDS),
@@ -4550,7 +4550,7 @@ __DEV__ &&
       this.clientRenderedBoundaries = [];
       this.completedBoundaries = [];
       this.partialBoundaries = [];
-      this.trackedPostpones = null;
+      this.postponedState = this.trackedPostpones = null;
       this.onError = void 0 === onError ? defaultErrorHandler : onError;
       this.onAllReady = void 0 === onAllReady ? noop : onAllReady;
       this.onShellReady = void 0 === onShellReady ? noop : onShellReady;
@@ -4970,6 +4970,7 @@ __DEV__ &&
     function fatalError(request, error, errorInfo, debugTask) {
       errorInfo = request.onShellError;
       var onFatalError = request.onFatalError;
+      request.onAllReady = noop;
       debugTask
         ? (debugTask.run(errorInfo.bind(null, error)),
           debugTask.run(onFatalError.bind(null, error)))
@@ -8438,6 +8439,8 @@ __DEV__ &&
         }
       } finally {
         (flushingPartialBoundaries = !1),
+          (i = request.postponedState),
+          null !== i && (i.nextSegmentId = request.nextSegmentId),
           0 === request.allPendingTasks &&
             0 === request.clientRenderedBoundaries.length &&
             0 === request.completedBoundaries.length &&
@@ -9473,7 +9476,7 @@ __DEV__ &&
                 break;
               default:
                 if (resumableState.moduleUnknownResources.hasOwnProperty(as)) {
-                  var resources = resumableState.unknownResources[as];
+                  var resources = resumableState.moduleUnknownResources[as];
                   if (resources.hasOwnProperty(href)) return;
                 } else
                   (resources = {}),
