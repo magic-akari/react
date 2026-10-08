@@ -3458,20 +3458,7 @@ fn codegen_place(cx: &mut Context, place: &Place) -> Result<ExpressionOrJsxText,
     let mut ast_ident = convert_identifier(place.identifier, cx.env)?;
     // Override identifier loc with place.loc, matching TS: identifier.loc = place.loc
     if let Some(loc) = place.loc {
-        ast_ident.base.loc = Some(AstSourceLocation {
-            start: AstPosition {
-                line: loc.start.line,
-                column: loc.start.column,
-                index: None,
-            },
-            end: AstPosition {
-                line: loc.end.line,
-                column: loc.end.column,
-                index: None,
-            },
-            filename: None,
-            identifier_name: None,
-        });
+        apply_diag_loc_to_base(&mut ast_ident.base, loc);
     }
     Ok(ExpressionOrJsxText::Expression(Expression::Identifier(
         ast_ident,
@@ -3686,27 +3673,30 @@ fn convert_update_operator(op: &react_compiler_hir::UpdateOperator) -> AstUpdate
 /// SourceLocation format. This is critical for Babel's `retainLines: true`
 /// option to insert blank lines at correct positions.
 fn base_node_with_loc(type_name: &str, loc: Option<DiagSourceLocation>) -> BaseNode {
-    match loc {
-        Some(loc) => BaseNode {
-            node_type: Some(type_name.to_string()),
-            loc: Some(AstSourceLocation {
-                start: AstPosition {
-                    line: loc.start.line,
-                    column: loc.start.column,
-                    index: loc.start.index,
-                },
-                end: AstPosition {
-                    line: loc.end.line,
-                    column: loc.end.column,
-                    index: loc.end.index,
-                },
-                filename: None,
-                identifier_name: None,
-            }),
-            ..Default::default()
-        },
-        None => BaseNode::typed(type_name),
+    let mut base = BaseNode::typed(type_name);
+    if let Some(loc) = loc {
+        apply_diag_loc_to_base(&mut base, loc);
     }
+    base
+}
+
+fn apply_diag_loc_to_base(base: &mut BaseNode, loc: DiagSourceLocation) {
+    base.start = loc.start_offset;
+    base.end = loc.end_offset;
+    base.loc = Some(AstSourceLocation {
+        start: AstPosition {
+            line: loc.start.line,
+            column: loc.start.column,
+            index: loc.start.index,
+        },
+        end: AstPosition {
+            line: loc.end.line,
+            column: loc.end.column,
+            index: loc.end.index,
+        },
+        filename: None,
+        identifier_name: None,
+    });
 }
 
 fn make_identifier(name: &str) -> AstIdentifier {
@@ -3811,32 +3801,18 @@ fn get_expression_loc(expr: &Expression) -> Option<&AstSourceLocation> {
 /// Apply a source location to an ExpressionOrJsxText value, matching the TS behavior
 /// where `value.loc = instrValue.loc` is set at the end of codegenInstructionValue.
 fn apply_loc_to_value(value: &mut ExpressionOrJsxText, loc: DiagSourceLocation) {
-    let ast_loc = AstSourceLocation {
-        start: AstPosition {
-            line: loc.start.line,
-            column: loc.start.column,
-            index: None,
-        },
-        end: AstPosition {
-            line: loc.end.line,
-            column: loc.end.column,
-            index: None,
-        },
-        filename: None,
-        identifier_name: None,
-    };
     match value {
         ExpressionOrJsxText::Expression(expr) => {
-            apply_loc_to_expression(expr, ast_loc);
+            apply_loc_to_expression(expr, loc);
         }
         ExpressionOrJsxText::JsxText(text) => {
-            text.base.loc = Some(ast_loc);
+            apply_diag_loc_to_base(&mut text.base, loc);
         }
     }
 }
 
 /// Apply a source location to an Expression's base node.
-fn apply_loc_to_expression(expr: &mut Expression, loc: AstSourceLocation) {
+fn apply_loc_to_expression(expr: &mut Expression, loc: DiagSourceLocation) {
     let base = match expr {
         Expression::Identifier(e) => &mut e.base,
         Expression::StringLiteral(e) => &mut e.base,
@@ -3865,9 +3841,25 @@ fn apply_loc_to_expression(expr: &mut Expression, loc: AstSourceLocation) {
         Expression::JSXFragment(e) => &mut e.base,
         Expression::NewExpression(e) => &mut e.base,
         Expression::OptionalCallExpression(e) => &mut e.base,
-        _ => return,
+        Expression::BigIntLiteral(e) => &mut e.base,
+        Expression::AwaitExpression(e) => &mut e.base,
+        Expression::YieldExpression(e) => &mut e.base,
+        Expression::MetaProperty(e) => &mut e.base,
+        Expression::ClassExpression(e) => &mut e.base,
+        Expression::PrivateName(e) => &mut e.base,
+        Expression::Super(e) => &mut e.base,
+        Expression::Import(e) => &mut e.base,
+        Expression::ThisExpression(e) => &mut e.base,
+        Expression::ParenthesizedExpression(e) => &mut e.base,
+        Expression::AssignmentPattern(e) => &mut e.base,
+        Expression::TSAsExpression(e) => &mut e.base,
+        Expression::TSSatisfiesExpression(e) => &mut e.base,
+        Expression::TSNonNullExpression(e) => &mut e.base,
+        Expression::TSTypeAssertion(e) => &mut e.base,
+        Expression::TSInstantiationExpression(e) => &mut e.base,
+        Expression::TypeCastExpression(e) => &mut e.base,
     };
-    base.loc = Some(loc);
+    apply_diag_loc_to_base(base, loc);
 }
 
 fn codegen_label(id: BlockId) -> String {
@@ -4085,6 +4077,8 @@ fn get_statement_loc(stmt: &Statement) -> Option<DiagSourceLocation> {
             column: loc.end.column,
             index: loc.end.index,
         },
+        start_offset: base.start,
+        end_offset: base.end,
     })
 }
 
@@ -4368,10 +4362,164 @@ fn apply_renames_to_json_inner(
 
 #[cfg(test)]
 mod tests {
+    use react_compiler_ast::common::BaseNode;
+    use react_compiler_ast::common::RawNode;
+    use react_compiler_ast::expressions::Expression;
+    use react_compiler_ast::expressions::Identifier;
+    use react_compiler_ast::expressions::TSAsExpression;
+    use react_compiler_ast::expressions::TSSatisfiesExpression;
+    use react_compiler_ast::expressions::TypeCastExpression;
+    use react_compiler_ast::jsx::JSXText;
     use react_compiler_ast::statements::Statement;
+    use react_compiler_diagnostics::Position as DiagPosition;
+    use react_compiler_diagnostics::SourceLocation as DiagSourceLocation;
     use serde_json::json;
 
-    use super::{UnsupportedOriginalNode, codegen_unsupported_original_node};
+    use super::{
+        ExpressionOrJsxText, UnsupportedOriginalNode, apply_loc_to_value, base_node_with_loc,
+        codegen_unsupported_original_node,
+    };
+
+    fn original_location() -> DiagSourceLocation {
+        DiagSourceLocation {
+            start: DiagPosition {
+                line: 2,
+                column: 4,
+                index: Some(1700),
+            },
+            end: DiagPosition {
+                line: 2,
+                column: 21,
+                index: Some(3400),
+            },
+            start_offset: Some(17),
+            end_offset: Some(34),
+        }
+    }
+
+    #[test]
+    fn base_node_with_loc_preserves_offsets_as_start_end() {
+        let node = base_node_with_loc("ExpressionStatement", Some(original_location()));
+
+        assert_eq!(node.node_type.as_deref(), Some("ExpressionStatement"));
+        assert_eq!(node.start, Some(17));
+        assert_eq!(node.end, Some(34));
+        assert_eq!(node.loc.as_ref().unwrap().start.index, Some(1700));
+        assert_eq!(node.loc.as_ref().unwrap().end.index, Some(3400));
+    }
+
+    #[test]
+    fn base_node_without_offsets_does_not_use_location_indices() {
+        let loc = DiagSourceLocation {
+            start_offset: None,
+            end_offset: None,
+            ..original_location()
+        };
+        let node = base_node_with_loc("ExpressionStatement", Some(loc));
+
+        assert_eq!((node.start, node.end), (None, None));
+        let actual = node
+            .loc
+            .as_ref()
+            .expect("location survives missing offsets");
+        assert_eq!(
+            (actual.start.index, actual.end.index),
+            (Some(1700), Some(3400))
+        );
+    }
+
+    #[test]
+    fn loc_overwrite_preserves_loc_index_and_offsets_separately() {
+        let loc = original_location();
+        let mut expr_value = ExpressionOrJsxText::Expression(Expression::Identifier(Identifier {
+            base: BaseNode::typed("Identifier"),
+            name: "x".to_string(),
+            type_annotation: None,
+            optional: None,
+            decorators: None,
+        }));
+
+        apply_loc_to_value(&mut expr_value, loc);
+
+        let ExpressionOrJsxText::Expression(Expression::Identifier(identifier)) = &expr_value
+        else {
+            panic!("expected identifier expression");
+        };
+        assert_eq!(identifier.base.start, Some(17));
+        assert_eq!(identifier.base.end, Some(34));
+        assert_eq!(
+            identifier.base.loc.as_ref().unwrap().start.index,
+            Some(1700)
+        );
+        assert_eq!(identifier.base.loc.as_ref().unwrap().end.index, Some(3400));
+
+        let mut text_value = ExpressionOrJsxText::JsxText(JSXText {
+            base: BaseNode::typed("JSXText"),
+            value: "text".to_string(),
+        });
+
+        apply_loc_to_value(&mut text_value, loc);
+
+        let ExpressionOrJsxText::JsxText(text) = &text_value else {
+            panic!("expected jsx text");
+        };
+        assert_eq!(text.base.start, Some(17));
+        assert_eq!(text.base.end, Some(34));
+        assert_eq!(text.base.loc.as_ref().unwrap().start.index, Some(1700));
+        assert_eq!(text.base.loc.as_ref().unwrap().end.index, Some(3400));
+    }
+
+    #[test]
+    fn loc_overwrite_applies_to_ts_and_flow_cast_wrappers() {
+        fn ident_expr() -> Box<Expression> {
+            Box::new(Expression::Identifier(Identifier {
+                base: BaseNode::typed("Identifier"),
+                name: "x".to_string(),
+                type_annotation: None,
+                optional: None,
+                decorators: None,
+            }))
+        }
+
+        let loc = original_location();
+
+        let cases = [
+            Expression::TSAsExpression(TSAsExpression {
+                base: BaseNode::typed("TSAsExpression"),
+                expression: ident_expr(),
+                type_annotation: RawNode::null(),
+            }),
+            Expression::TSSatisfiesExpression(TSSatisfiesExpression {
+                base: BaseNode::typed("TSSatisfiesExpression"),
+                expression: ident_expr(),
+                type_annotation: RawNode::null(),
+            }),
+            Expression::TypeCastExpression(TypeCastExpression {
+                base: BaseNode::typed("TypeCastExpression"),
+                expression: ident_expr(),
+                type_annotation: RawNode::null(),
+            }),
+        ];
+
+        for expr in cases {
+            let mut value = ExpressionOrJsxText::Expression(expr);
+            apply_loc_to_value(&mut value, loc);
+            let ExpressionOrJsxText::Expression(expr) = value else {
+                panic!("expected expression");
+            };
+            let base = match expr {
+                Expression::TSAsExpression(expr) => expr.base,
+                Expression::TSSatisfiesExpression(expr) => expr.base,
+                Expression::TypeCastExpression(expr) => expr.base,
+                _ => panic!("expected cast wrapper"),
+            };
+
+            assert_eq!(base.start, Some(17));
+            assert_eq!(base.end, Some(34));
+            assert_eq!(base.loc.as_ref().unwrap().start.index, Some(1700));
+            assert_eq!(base.loc.as_ref().unwrap().end.index, Some(3400));
+        }
+    }
 
     /// The Fast Refresh source hash must match Node's
     /// `createHmac('sha256', code).digest('hex')` byte-for-byte, or hot-reload

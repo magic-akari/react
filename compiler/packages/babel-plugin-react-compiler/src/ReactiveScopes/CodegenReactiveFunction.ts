@@ -116,6 +116,12 @@ export function codegenFunction(
     fbtOperands: Set<IdentifierId>;
   },
 ): CodegenFunction {
+  const sourceNodes = new Map<t.SourceLocation, t.Node>();
+  t.traverseFast(fn.env.parentFunction.node, node => {
+    if (node.loc != null) {
+      sourceNodes.set(node.loc, node);
+    }
+  });
   const cx = new Context(
     fn.env,
     fn.id ?? '[[ anonymous ]]',
@@ -326,6 +332,35 @@ export function codegenFunction(
     outlined.push({fn: codegen, type});
   }
   compiled.outlined = outlined;
+
+  const applySourceOffsets = (node: t.Node): void => {
+    if (node.loc == null) {
+      return;
+    }
+    const source = sourceNodes.get(node.loc);
+    if (source != null) {
+      if (source.start === undefined) {
+        delete node.start;
+      } else {
+        node.start = source.start;
+      }
+      if (source.end === undefined) {
+        delete node.end;
+      } else {
+        node.end = source.end;
+      }
+    }
+  };
+  const applyFunctionOffsets = (fn: CodegenFunction): void => {
+    for (const param of fn.params) {
+      t.traverseFast(param, applySourceOffsets);
+    }
+    t.traverseFast(fn.body, applySourceOffsets);
+  };
+  applyFunctionOffsets(compiled);
+  for (const {fn} of outlined) {
+    applyFunctionOffsets(fn);
+  }
 
   return compiled;
 }
