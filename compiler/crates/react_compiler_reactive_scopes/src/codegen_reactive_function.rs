@@ -1007,6 +1007,7 @@ fn codegen_reactive_scope(
                 declarations: vec![make_var_declarator(
                     PatternLike::Identifier(name.clone()),
                     None,
+                    ident.loc,
                 )],
                 kind: VariableDeclarationKind::Let,
                 declare: None,
@@ -1791,17 +1792,30 @@ fn codegen_store_or_declare(
 ) -> Result<Option<Statement>, CompilerError> {
     match value {
         InstructionValue::StoreLocal {
-            lvalue, value: val, ..
+            lvalue,
+            value: val,
+            loc,
+            ..
         } => {
             let mut kind = lvalue.kind;
             if cx.has_declared(lvalue.place.identifier) {
                 kind = InstructionKind::Reassign;
             }
             let rhs = codegen_place_to_expression(cx, val)?;
-            emit_store(cx, instr, kind, &LvalueRef::Place(&lvalue.place), Some(rhs))
+            emit_store(
+                cx,
+                instr,
+                kind,
+                &LvalueRef::Place(&lvalue.place),
+                Some(rhs),
+                *loc,
+            )
         }
         InstructionValue::StoreContext {
-            lvalue, value: val, ..
+            lvalue,
+            value: val,
+            loc,
+            ..
         } => {
             let rhs = codegen_place_to_expression(cx, val)?;
             emit_store(
@@ -1810,10 +1824,11 @@ fn codegen_store_or_declare(
                 lvalue.kind,
                 &LvalueRef::Place(&lvalue.place),
                 Some(rhs),
+                *loc,
             )
         }
-        InstructionValue::DeclareLocal { lvalue, .. }
-        | InstructionValue::DeclareContext { lvalue, .. } => {
+        InstructionValue::DeclareLocal { lvalue, loc, .. }
+        | InstructionValue::DeclareContext { lvalue, loc } => {
             if cx.has_declared(lvalue.place.identifier) {
                 return Ok(None);
             }
@@ -1823,10 +1838,13 @@ fn codegen_store_or_declare(
                 lvalue.kind,
                 &LvalueRef::Place(&lvalue.place),
                 None,
+                *loc,
             )
         }
         InstructionValue::Destructure {
-            lvalue, value: val, ..
+            lvalue,
+            value: val,
+            loc,
         } => {
             let kind = lvalue.kind;
             // Register temporaries for unnamed pattern operands
@@ -1845,6 +1863,7 @@ fn codegen_store_or_declare(
                 kind,
                 &LvalueRef::Pattern(&lvalue.pattern),
                 Some(rhs),
+                *loc,
             )
         }
         _ => unreachable!(),
@@ -1857,6 +1876,7 @@ fn emit_store(
     kind: InstructionKind,
     lvalue: &LvalueRef,
     value: Option<Expression>,
+    loc: Option<DiagSourceLocation>,
 ) -> Result<Option<Statement>, CompilerError> {
     match kind {
         InstructionKind::Const => {
@@ -1872,7 +1892,7 @@ fn emit_store(
             let lval = codegen_lvalue(cx, lvalue)?;
             Ok(Some(Statement::VariableDeclaration(VariableDeclaration {
                 base: base_node_with_loc("VariableDeclaration", instr.loc),
-                declarations: vec![make_var_declarator(lval, value)],
+                declarations: vec![make_var_declarator(lval, value, loc)],
                 kind: VariableDeclarationKind::Const,
                 declare: None,
             })))
@@ -1926,7 +1946,7 @@ fn emit_store(
             let lval = codegen_lvalue(cx, lvalue)?;
             Ok(Some(Statement::VariableDeclaration(VariableDeclaration {
                 base: base_node_with_loc("VariableDeclaration", instr.loc),
-                declarations: vec![make_var_declarator(lval, value)],
+                declarations: vec![make_var_declarator(lval, value, loc)],
                 kind: VariableDeclarationKind::Let,
                 declare: None,
             })))
@@ -2025,6 +2045,7 @@ fn codegen_instruction(
             declarations: vec![make_var_declarator(
                 PatternLike::Identifier(convert_identifier(lvalue.identifier, cx.env)?),
                 Some(expr_value),
+                instr.loc,
             )],
             kind: VariableDeclarationKind::Const,
             declare: None,
@@ -3719,82 +3740,16 @@ fn make_identifier_with_loc(name: &str, loc: Option<DiagSourceLocation>) -> AstI
     }
 }
 
-fn make_var_declarator(id: PatternLike, init: Option<Expression>) -> VariableDeclarator {
-    // Reconstruct VariableDeclarator.loc from id.loc.start and init.loc.end,
-    // matching TS createVariableDeclarator behavior for retainLines support.
-    let loc = get_pattern_loc(&id).and_then(|id_loc| {
-        let end = match &init {
-            Some(expr) => get_expression_loc(expr)
-                .map(|l| l.end.clone())
-                .unwrap_or_else(|| id_loc.end.clone()),
-            None => id_loc.end.clone(),
-        };
-        Some(AstSourceLocation {
-            start: id_loc.start.clone(),
-            end,
-            filename: id_loc.filename.clone(),
-            identifier_name: None,
-        })
-    });
+fn make_var_declarator(
+    id: PatternLike,
+    init: Option<Expression>,
+    loc: Option<DiagSourceLocation>,
+) -> VariableDeclarator {
     VariableDeclarator {
-        base: if let Some(loc) = loc {
-            BaseNode {
-                node_type: Some("VariableDeclarator".to_string()),
-                loc: Some(loc),
-                ..Default::default()
-            }
-        } else {
-            BaseNode::typed("VariableDeclarator")
-        },
+        base: base_node_with_loc("VariableDeclarator", loc),
         id,
         init: init.map(Box::new),
         definite: None,
-    }
-}
-
-/// Extract the loc from a PatternLike's base node.
-fn get_pattern_loc(pattern: &PatternLike) -> Option<&AstSourceLocation> {
-    match pattern {
-        PatternLike::Identifier(id) => id.base.loc.as_ref(),
-        PatternLike::ObjectPattern(p) => p.base.loc.as_ref(),
-        PatternLike::ArrayPattern(p) => p.base.loc.as_ref(),
-        PatternLike::AssignmentPattern(p) => p.base.loc.as_ref(),
-        PatternLike::RestElement(p) => p.base.loc.as_ref(),
-        _ => None,
-    }
-}
-
-/// Extract the loc from an Expression's base node.
-fn get_expression_loc(expr: &Expression) -> Option<&AstSourceLocation> {
-    match expr {
-        Expression::Identifier(e) => e.base.loc.as_ref(),
-        Expression::StringLiteral(e) => e.base.loc.as_ref(),
-        Expression::NumericLiteral(e) => e.base.loc.as_ref(),
-        Expression::BooleanLiteral(e) => e.base.loc.as_ref(),
-        Expression::NullLiteral(e) => e.base.loc.as_ref(),
-        Expression::CallExpression(e) => e.base.loc.as_ref(),
-        Expression::MemberExpression(e) => e.base.loc.as_ref(),
-        Expression::OptionalMemberExpression(e) => e.base.loc.as_ref(),
-        Expression::ArrayExpression(e) => e.base.loc.as_ref(),
-        Expression::ObjectExpression(e) => e.base.loc.as_ref(),
-        Expression::ArrowFunctionExpression(e) => e.base.loc.as_ref(),
-        Expression::FunctionExpression(e) => e.base.loc.as_ref(),
-        Expression::BinaryExpression(e) => e.base.loc.as_ref(),
-        Expression::UnaryExpression(e) => e.base.loc.as_ref(),
-        Expression::UpdateExpression(e) => e.base.loc.as_ref(),
-        Expression::LogicalExpression(e) => e.base.loc.as_ref(),
-        Expression::ConditionalExpression(e) => e.base.loc.as_ref(),
-        Expression::SequenceExpression(e) => e.base.loc.as_ref(),
-        Expression::AssignmentExpression(e) => e.base.loc.as_ref(),
-        Expression::TemplateLiteral(e) => e.base.loc.as_ref(),
-        Expression::TaggedTemplateExpression(e) => e.base.loc.as_ref(),
-        Expression::SpreadElement(e) => e.base.loc.as_ref(),
-        Expression::RegExpLiteral(e) => e.base.loc.as_ref(),
-        Expression::JSXElement(e) => e.base.loc.as_ref(),
-        Expression::JSXFragment(e) => e.base.loc.as_ref(),
-        Expression::NewExpression(e) => e.base.loc.as_ref(),
-        Expression::OptionalCallExpression(e) => e.base.loc.as_ref(),
-        _ => None,
     }
 }
 
@@ -4377,7 +4332,7 @@ mod tests {
 
     use super::{
         ExpressionOrJsxText, UnsupportedOriginalNode, apply_loc_to_value, base_node_with_loc,
-        codegen_unsupported_original_node,
+        codegen_unsupported_original_node, make_var_declarator,
     };
 
     fn original_location() -> DiagSourceLocation {
@@ -4395,6 +4350,80 @@ mod tests {
             start_offset: Some(17),
             end_offset: Some(34),
         }
+    }
+
+    fn declarator_children() -> (react_compiler_ast::patterns::PatternLike, Expression) {
+        let child_loc = json!({
+            "start": { "line": 1, "column": 0, "index": 0 },
+            "end": { "line": 1, "column": 1, "index": 1 },
+        });
+        let id = serde_json::from_value(json!({
+            "type": "Identifier", "name": "x", "start": 0, "end": 1, "loc": child_loc,
+        }))
+        .expect("valid declarator binding");
+        let init = serde_json::from_value(json!({
+            "type": "StringLiteral", "value": "hi", "start": 0, "end": 1, "loc": child_loc,
+        }))
+        .expect("valid constant-folded initializer");
+        (id, init)
+    }
+
+    #[test]
+    fn declarator_location_comes_from_the_declaration_not_its_children() {
+        let (id, init) = declarator_children();
+        let declarator = make_var_declarator(id, Some(init), Some(original_location()));
+
+        assert_eq!(
+            (declarator.base.start, declarator.base.end),
+            (Some(17), Some(34))
+        );
+        let actual = declarator
+            .base
+            .loc
+            .as_ref()
+            .expect("declaration location is preserved");
+        assert_eq!(
+            (actual.start.line, actual.start.column, actual.start.index),
+            (2, 4, Some(1700))
+        );
+        assert_eq!(
+            (actual.end.line, actual.end.column, actual.end.index),
+            (2, 21, Some(3400))
+        );
+    }
+
+    #[test]
+    fn declarator_without_offsets_does_not_use_location_indices() {
+        let (id, init) = declarator_children();
+        let loc = DiagSourceLocation {
+            start_offset: None,
+            end_offset: None,
+            ..original_location()
+        };
+        let declarator = make_var_declarator(id, Some(init), Some(loc));
+
+        assert_eq!((declarator.base.start, declarator.base.end), (None, None));
+        let actual = declarator
+            .base
+            .loc
+            .as_ref()
+            .expect("location survives missing offsets");
+        assert_eq!(
+            (actual.start.index, actual.end.index),
+            (Some(1700), Some(3400))
+        );
+    }
+
+    #[test]
+    fn declarator_without_location_does_not_use_child_metadata() {
+        let (id, init) = declarator_children();
+        let declarator = make_var_declarator(id, Some(init), None);
+
+        assert_eq!((declarator.base.start, declarator.base.end), (None, None));
+        assert!(
+            declarator.base.loc.is_none(),
+            "a missing declaration location must not be inferred from its children"
+        );
     }
 
     #[test]

@@ -277,6 +277,14 @@ fn lower_value_to_temporary(
         }
     }
     let loc = value.loc().copied();
+    Ok(lower_value_to_temporary_at(builder, value, loc))
+}
+
+fn lower_value_to_temporary_at(
+    builder: &mut HirBuilder,
+    value: InstructionValue,
+    loc: Option<SourceLocation>,
+) -> Place {
     let place = build_temporary_place(builder, loc);
     builder.push(Instruction {
         id: EvaluationOrder(0),
@@ -285,7 +293,7 @@ fn lower_value_to_temporary(
         loc,
         effects: None,
     });
-    Ok(place)
+    place
 }
 
 fn lower_expression_to_temporary(
@@ -3090,7 +3098,20 @@ fn lower_statement(
                         }
                         _ => AssignmentStyle::Assignment,
                     };
-                    lower_assignment(builder, stmt_loc, kind, &declarator.id, value, assign_style)?;
+                    // Preserve both AST nodes: the instruction emits the enclosing
+                    // statement, while its value represents this declarator.
+                    let source = AssignmentSource {
+                        instruction_loc: stmt_loc,
+                        value_loc: convert_base_loc(&declarator.base),
+                    };
+                    lower_assignment_at(
+                        builder,
+                        source,
+                        kind,
+                        &declarator.id,
+                        value,
+                        assign_style,
+                    )?;
                 } else if let PatternLike::Identifier(id) = &declarator.id {
                     // No init: emit DeclareLocal or DeclareContext
                     let id_loc = convert_base_loc(&id.base);
@@ -4447,6 +4468,11 @@ fn lower_identifier_for_assignment(
     }
 }
 
+struct AssignmentSource {
+    instruction_loc: Option<SourceLocation>,
+    value_loc: Option<SourceLocation>,
+}
+
 fn lower_assignment(
     builder: &mut HirBuilder,
     loc: Option<SourceLocation>,
@@ -4455,7 +4481,29 @@ fn lower_assignment(
     value: Place,
     assignment_style: AssignmentStyle,
 ) -> Result<Option<Place>, CompilerError> {
+    lower_assignment_at(
+        builder,
+        AssignmentSource {
+            instruction_loc: loc,
+            value_loc: loc,
+        },
+        kind,
+        target,
+        value,
+        assignment_style,
+    )
+}
+
+fn lower_assignment_at(
+    builder: &mut HirBuilder,
+    source: AssignmentSource,
+    kind: InstructionKind,
+    target: &react_compiler_ast::patterns::PatternLike,
+    value: Place,
+    assignment_style: AssignmentStyle,
+) -> Result<Option<Place>, CompilerError> {
     use react_compiler_ast::patterns::PatternLike;
+    let loc = source.instruction_loc;
 
     match target {
         PatternLike::Identifier(id) => {
@@ -4522,26 +4570,28 @@ fn lower_assignment(
                             )?;
                             return Ok(Some(temp));
                         }
-                        let temp = lower_value_to_temporary(
+                        let temp = lower_value_to_temporary_at(
                             builder,
                             InstructionValue::StoreContext {
                                 lvalue: LValue { place, kind },
                                 value,
-                                loc,
+                                loc: source.value_loc,
                             },
-                        )?;
+                            loc,
+                        );
                         return Ok(Some(temp));
                     } else {
                         let type_annotation = extract_type_annotation_name(&id.type_annotation);
-                        let temp = lower_value_to_temporary(
+                        let temp = lower_value_to_temporary_at(
                             builder,
                             InstructionValue::StoreLocal {
                                 lvalue: LValue { place, kind },
                                 value,
                                 type_annotation,
-                                loc,
+                                loc: source.value_loc,
                             },
-                        )?;
+                            loc,
+                        );
                         return Ok(Some(temp));
                     }
                 }
@@ -4809,7 +4859,7 @@ fn lower_assignment(
                 }
             }
 
-            let temporary = lower_value_to_temporary(
+            let temporary = lower_value_to_temporary_at(
                 builder,
                 InstructionValue::Destructure {
                     lvalue: LValuePattern {
@@ -4820,12 +4870,13 @@ fn lower_assignment(
                         kind,
                     },
                     value: value.clone(),
-                    loc,
+                    loc: source.value_loc,
                 },
-            )?;
+                loc,
+            );
 
             for (place, path) in followups {
-                let followup_loc = pattern_like_loc(path).or(loc.clone());
+                let followup_loc = pattern_like_loc(path).or(loc);
                 lower_assignment(builder, followup_loc, kind, path, place, assignment_style)?;
             }
             Ok(Some(temporary))
@@ -5034,7 +5085,7 @@ fn lower_assignment(
                 }
             }
 
-            let temporary = lower_value_to_temporary(
+            let temporary = lower_value_to_temporary_at(
                 builder,
                 InstructionValue::Destructure {
                     lvalue: LValuePattern {
@@ -5045,12 +5096,13 @@ fn lower_assignment(
                         kind,
                     },
                     value: value.clone(),
-                    loc,
+                    loc: source.value_loc,
                 },
-            )?;
+                loc,
+            );
 
             for (place, path) in followups {
-                let followup_loc = pattern_like_loc(path).or(loc.clone());
+                let followup_loc = pattern_like_loc(path).or(loc);
                 lower_assignment(builder, followup_loc, kind, path, place, assignment_style)?;
             }
             Ok(Some(temporary))

@@ -658,7 +658,9 @@ function codegenReactiveScope(
     const name = convertIdentifier(identifier);
     if (!cx.hasDeclared(identifier)) {
       statements.push(
-        t.variableDeclaration('let', [createVariableDeclarator(name, null)]),
+        t.variableDeclaration('let', [
+          createVariableDeclarator(name.loc, name, null),
+        ]),
       );
     }
     cacheLoads.push({name, index, value: name});
@@ -1124,7 +1126,11 @@ function codegenInstructionNullable(
           loc: instr.value.loc,
         });
         return createVariableDeclaration(instr.loc, 'const', [
-          createVariableDeclarator(codegenLValue(cx, lvalue), value),
+          createVariableDeclarator(
+            instr.value.loc,
+            codegenLValue(cx, lvalue),
+            value,
+          ),
         ]);
       }
       case InstructionKind.Function: {
@@ -1158,7 +1164,11 @@ function codegenInstructionNullable(
           loc: instr.value.loc,
         });
         return createVariableDeclaration(instr.loc, 'let', [
-          createVariableDeclarator(codegenLValue(cx, lvalue), value),
+          createVariableDeclarator(
+            instr.value.loc,
+            codegenLValue(cx, lvalue),
+            value,
+          ),
         ]);
       }
       case InstructionKind.Reassign: {
@@ -1331,6 +1341,7 @@ const createBinaryExpression = withLoc(t.binaryExpression);
 const createExpressionStatement = withLoc(t.expressionStatement);
 const _createLabelledStatement = withLoc(t.labeledStatement);
 const createVariableDeclaration = withLoc(t.variableDeclaration);
+const createVariableDeclarator = withLoc(t.variableDeclarator);
 const createFunctionDeclaration = withLoc(t.functionDeclaration);
 const createWhileStatement = withLoc(t.whileStatement);
 const createDoWhileStatement = withLoc(t.doWhileStatement);
@@ -1358,31 +1369,6 @@ const createTryStatement = withLoc(t.tryStatement);
 const createBreakStatement = withLoc(t.breakStatement);
 const createContinueStatement = withLoc(t.continueStatement);
 const createReturnStatement = withLoc(t.returnStatement);
-
-function createVariableDeclarator(
-  id: t.LVal,
-  init?: t.Expression | null,
-): t.VariableDeclarator {
-  const node = t.variableDeclarator(id, init);
-
-  /*
-   * The variable declarator location is not preserved in HIR, however, we can use the
-   * start location of the id and the end location of the init to recreate the
-   * exact original variable declarator location.
-   *
-   * Or if init is null, we likely have a declaration without an initializer, so we can use the id.loc.end as the end location.
-   */
-  if (id.loc && (init === null || init?.loc)) {
-    node.loc = {
-      start: id.loc.start,
-      end: init?.loc?.end ?? id.loc.end,
-      filename: id.loc.filename,
-      identifierName: undefined,
-    };
-  }
-
-  return node;
-}
 
 function createHookGuard(
   guard: ExternalFunction,
@@ -1492,6 +1478,7 @@ function codegenInstruction(
     } else {
       return createVariableDeclaration(instr.loc, 'const', [
         createVariableDeclarator(
+          instr.loc,
           convertIdentifier(instr.lvalue.identifier),
           expressionValue,
         ),
